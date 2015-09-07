@@ -16,11 +16,3 @@
 	   #:with-sqlite-queries
 	   #:create-with-db-macro))
 
-;; yes this is ugly
-
-(in-package :sqlite)
-
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (dolist (sym '(resultset-columns-names
-		 resultset-columns-count))
-    (export sym :sqlite)))

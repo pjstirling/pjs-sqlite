@@ -50,7 +50,7 @@
   (with-sqlite-statements (db
 			   (stmt (sconc "SELECT * FROM "
 					name)))
-    (sqlite:resultset-columns-names stmt)))
+    (sqlite::resultset-columns-names stmt)))
       
 (defun migrate-table-data (db source dest)
   (let ((column-names (intersection (fetch-table-column-names db source)
