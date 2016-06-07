@@ -43,6 +43,9 @@
        (unwind-protect
 	    (progn
 	      (sqlite:execute-non-query ,db-name "PRAGMA foreign_keys=0")
+	      (when (= 1
+		       (sqlite:execute-one-row-m-v db "PRAGMA foreign_keys"))
+		(error "couldn't disable foreign-keys"))
 	      ,@body)
 	 (sqlite:execute-non-query ,db-name (format nil "PRAGMA foreign_keys=~w" ,old-value))))))
 
@@ -61,17 +64,18 @@
     
     (multiple-value-bind (result condition)
 	(ignore-errors
-	  (sqlite:execute-non-query db
-				    (sconc "INSERT INTO "
-					   dest
-					   " ( "
-					   (join ", "
-						 column-names)
-					   " ) SELECT "
-					   (join ", "
-						 column-names)
-					   " FROM "
-					   source)))
+	 (sqlite:with-transaction db
+	   (sqlite:execute-non-query db
+				     (sconc "INSERT INTO "
+					    dest
+					    " ( "
+					    (join ", "
+						  column-names)
+					    " ) SELECT "
+					    (join ", "
+						  column-names)
+					    " FROM "
+					    source))))
       (declare (ignore result))
       (not condition))))
       
