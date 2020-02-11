@@ -6,5 +6,6 @@
   :serial t
   :components ((:file "package")
                (:file "sqlite")
+	       (:file "selects")
 	       (:file "tables")))
 

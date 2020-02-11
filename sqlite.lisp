@@ -61,23 +61,22 @@
 				    :test #'string=)))
     (unless column-names
       (error "table ~a and table ~a have no columns in common!" source dest))
-    
-    (multiple-value-bind (result condition)
-	(ignore-errors
-	 (sqlite:with-transaction db
-	   (sqlite:execute-non-query db
-				     (sconc "INSERT INTO "
-					    dest
-					    " ( "
-					    (join ", "
-						  column-names)
-					    " ) SELECT "
-					    (join ", "
-						  column-names)
-					    " FROM "
-					    source))))
-      (declare (ignore result))
-      (not condition))))
+    (let ((fields (apply #'join ", " column-names)))
+      (multiple-value-bind (result condition)
+	  (ignore-errors
+	   (sqlite:with-transaction db
+	     (sqlite:execute-non-query db
+				       (sconc "INSERT INTO "
+					      dest
+					      " ( "
+					      fields
+					      " ) SELECT "
+					      fields
+					      " FROM "
+					      source))))
+	(declare (ignore result))
+	(format t "migration ~w~%" condition)
+	(not condition)))))
       
 (defun create-index-helper (db index-name sql)
   (let ((schema (sqlite:execute-single db "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?" index-name)))
@@ -95,7 +94,7 @@
 			    (apply #'join "_" sql-columns)
 			    "_index"))
 	 (sql (sconc "CREATE INDEX " index-name " ON " table-name 
-		     " ( " (join ", " sql-columns) " )")))
+		     " ( " (apply #'join ", " sql-columns) " )")))
     `(create-index-helper ,db ,index-name ,sql)))
 					 
 (defmacro do-sqlite-query (db (sql &rest args) (&rest fields) &body body)
@@ -120,26 +119,6 @@
   (format t "~a ~a" track-id track-name))
 |#
 
-(defmacro do-sqlite-query* (db (sql args) (&rest fields) &body body)
-  "Like DO-SQLITE-QUERY but uses a runtime ARGS list which skips NIL elements."
-  (let ((stmt (gensym))
-	(counter (gensym))
-	(arg (gensym))
-	(field-index 0))
-    `(with-sqlite-statements (,db (,stmt ,sql))
-       (let ((,counter 1))
-	 (dolist (,arg ,args)
-	   (when ,arg
-	     (sqlite:bind-parameter ,stmt ,counter ,arg)
-	     (incf ,counter))))
-       (while (sqlite:step-statement ,stmt)
-	 (let ,(mapcar (lambda (field)
-			 (prog1
-			     `(,field (sqlite:statement-column-value ,stmt
-								     ,field-index))
-			   (incf field-index)))
-		fields)
-	   ,@body)))))
 
 (defun sqlite-execute-to-flat-list (db sql &rest args)
   (with-sqlite-statements (db (stmt sql))
@@ -240,22 +219,21 @@
 					    (second x)
 					    x)))
 			  `(,arg-name ,x)))
-		    known-args)
-	  (id (key-in-table ,db ,table ,@known-args)))
-     (if id
-	 id
-	 ;; else
+		    known-args))
+     (or (key-in-table ,db ,table ,@known-args)
 	 (progn
 	   (sqlite:execute-non-query ,db 
 				     ,(sconc "INSERT INTO "
 					     (sql-name table)
 					     " ( "
-					     (join ", "
-						   (mapcar #'magic-column-arg-name known-args))
+					     (apply #'join
+						    ", "
+						    (mapcar #'magic-column-arg-name known-args))
 					     " ) VALUES ( "
-					     (join ", "
-						   (n-copies (length known-args)
-							     "?"))
+					     (apply #'join
+						    ", "
+						    (n-copies (length known-args)
+							      "?"))
 					     " )")
 				     ,@known-args)
 	   (sqlite:last-insert-rowid ,db)))))

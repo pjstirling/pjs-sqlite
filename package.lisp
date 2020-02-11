@@ -14,5 +14,6 @@
            #:key-in-table
            #:select-or-insert
 	   #:with-sqlite-queries
-	   #:create-with-db-macro))
+	   #:create-with-db-macro
+	   #:*enable-statement-debugging*))
 

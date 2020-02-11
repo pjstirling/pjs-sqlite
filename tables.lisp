@@ -30,6 +30,9 @@
 (defun column-is-integer-p (col)
   (member :i col))
 
+(defun column-is-real-p (col)
+  (eq :r (second col)))
+
 (defun column-is-text-p (col)
   (member :t col))
 
@@ -55,7 +58,7 @@
   (remove-if #'column-is-optional-p columns))
 
 (defun column-is-legal-p (col)
-  (only-one-of-p col '(:b :i :t :auto-key)))
+  (only-one-of-p col '(:b :i :t :r :auto-key)))
 
 (defun column-references-table (col)
   (first-after :fk col))
@@ -92,52 +95,80 @@
 	(unless (eq name table)
 	  (collect table))))))
   
+(defun sql-quote-string (s)
+  "SQL uses pascal style strings which are single-quoted. and enclosed single-quptes are doubled"
+  (let ((result (make-array (* (length s)
+			       2)
+			    :adjustable t
+			    :fill-pointer 0)))
+    (vector-push-extend #\' result)
+    (dovector (ch s)
+      (when (char= ch #\')
+	(vector-push-extend #\' result))
+      (vector-push-extend ch result))
+    (vector-push-extend #\' result)
+    (coerce result 'string)))
+
 (defun build-create-table-sql (name columns)
   (with-output-to-string (s)
     (format s 
-	    "CREATE TABLE ~a (~%    ~a~%)"
+	    "CREATE TABLE ~a (~%  ~a~%)"
 	    (sql-name name)
 	    (join +separator-string+
-		  (mapcar #'(lambda (col)
-			      (unless (column-is-legal-p col)
-				(error "illegal column spec: ~a" col))
-			      (sconc (sql-name (first col))
-				     (cond
-				       ((column-is-integer-p col)
-					" INTEGER")
-				       ((column-is-text-p col)
-					" TEXT")
-				       ((column-is-bool-p col)
-					" CHARACTER(1) DEFAULT 'N'")
-				       ((column-is-auto-key-p col)
-					" INTEGER PRIMARY KEY NOT NULL")
-				       (t 
-					(error "unhandled column kind (~A)" col)))
-				     (awhen (column-default-value col)
-				       (format nil " DEFAULT ~w" it))
-				     (awhen (column-references-table col)
-				       (format nil
-					       " REFERENCES ~a ( ~a ) ON DELETE CASCADE"
-					       (sql-name (if (symbolp it)
-							     it
-							     ;; else
-							     (first it)))
-					       (sql-name (if (symbolp it)
-							     "id"
-							     ;; else
-							     (second it)))))
-				     (when (column-is-unique-p col)
-				       " UNIQUE")
-				     (unless (column-is-nullable-p col)
-				       " NOT NULL")))
-			  columns)
+		  (apply #'join
+			 +separator-string+
+			 (mapcar #'(lambda (col)
+				     (unless (column-is-legal-p col)
+				       (error "illegal column spec: ~a" col))
+				     (sconc (sql-name (first col))
+					    (cond
+					      ((column-is-integer-p col)
+					       " INTEGER")
+					      ((column-is-real-p col)
+					       " REAL")
+					      ((column-is-text-p col)
+					       " TEXT")
+					      ((column-is-bool-p col)
+					       " CHARACTER(1) DEFAULT 'N'")
+					      ((column-is-auto-key-p col)
+					       " INTEGER PRIMARY KEY NOT NULL")
+					      (t
+					       (error "unhandled column kind (~A)" col)))
+					    (awhen (column-default-value col)
+					      (etypecase it
+						((or number symbol)
+						 (format nil " DEFAULT ~w" it))
+						(character
+						 (let* ((str (make-string 1
+									  :initial-element it))
+							(quoted (sql-quote-string str)))
+						   (format nil " DEFAULT ~a" quoted)))
+						(string
+						 (format nil " DEFAULT ~a" (sql-quote-string it)))))
+					    (awhen (column-references-table col)
+					      (format nil
+						      " REFERENCES ~a ( ~a ) ON DELETE CASCADE"
+						      (sql-name (if (symbolp it)
+								    it
+								    ;; else
+								    (first it)))
+						      (sql-name (if (symbolp it)
+								    "id"
+								    ;; else
+								    (second it)))))
+					    (when (column-is-unique-p col)
+					      " UNIQUE")
+					    (unless (column-is-nullable-p col)
+					      " NOT NULL")))
+				 columns))
 		  (when (find-if #'column-is-multi-key-p
 				 columns)
 		    (sconc "PRIMARY KEY ( "
-			   (join ", "
-				 (mapcar #'(lambda (col) (sql-name (first col)))
-					 (remove-if-not #'column-is-multi-key-p
-							columns)))
+			   (apply #'join
+				  ", "
+				  (mapcar #'(lambda (col) (sql-name (first col)))
+					  (remove-if-not #'column-is-multi-key-p
+							 columns)))
 			   " )"))))))
 
 (defun create-table-function-name (name)
@@ -237,20 +268,22 @@
 				 (stmt (sconc "INSERT INTO "
 					      ,(sql-name name)
 					      " ( "
-					      (join +separator-string+
-						    ,(join +separator-string+
-							   (mapcar #'(lambda (x)
-								       (sql-name (first x)))
-								   required-columns))
-						    ,@(mapcar #'(lambda (col)
-								  `(when ,(symb (first col) '-p)
-								     ,(sql-name (first col))))
+					      (join ,+separator-string+
+						    ,(apply #'join
+							    +separator-string+
+							    (mapcar (lambda (x)
+								      (sql-name (first x)))
+								    required-columns))
+						    ,@(mapcar (lambda (col)
+								`(when ,(symb (first col) '-p)
+								   ,(sql-name (first col))))
 							      optional-columns))
 					      " ) VALUES ( "
 					      (join ","
-						    ,(join ","
-							   (n-copies (length required-columns)
-								     "?"))
+						    ,(apply #'join
+							    ","
+							    (n-copies (length required-columns)
+								      "?"))
 						    ,@(mapcar #'(lambda (col)
 								  `(when ,(symb (first col) '-p)
 								     "?"))
@@ -362,22 +395,22 @@
 ;; ========================================================
 
 (defmacro defsqlite-table (name &body columns)
-  `(progn
-     (defparameter ,(create-table-sql-name name)
-       ,(build-create-table-sql name columns))
-     
-     ,(defsqlite-table-creator name columns)
-     
-     (eval-when (:load-toplevel)
-       (setf (gethash ',name *sqlite-tables*) #',(create-table-function-name name))
-       
-       ;; so we can rebuild dependant tables after migration
-       (setf (gethash ',name *sqlite-table-dependencies*)
-	     ',(table-dependencies name columns)))
-     
-     ,(defsqlite-table-inserter name columns)
-     ,(defsqlite-table-updater name columns)
-     ,(defsqlite-table-deleter name columns)))
+  (let ((*print-case* :upcase))
+    `(progn
+       (defparameter ,(create-table-sql-name name)
+	 ,(build-create-table-sql name columns))
+       ;;
+       ,(defsqlite-table-creator name columns)
+       ;;
+       (eval-when (:load-toplevel)
+	 (setf (gethash ',name *sqlite-tables*) #',(create-table-function-name name))
+	 ;; so we can rebuild dependant tables after migration
+	 (setf (gethash ',name *sqlite-table-dependencies*)
+	       ',(table-dependencies name columns)))
+       ;;
+       ,(defsqlite-table-inserter name columns)
+       ,(defsqlite-table-updater name columns)
+       ,(defsqlite-table-deleter name columns))))
 
 (defun create-all-tables (db log package)
   (let ((package (find-package package)))
