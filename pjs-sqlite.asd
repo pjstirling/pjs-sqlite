@@ -1,4 +1,4 @@
-(eval-when (:compile-toplevel :load-toplevel)
+(eval-when (:compile-toplevel :load-toplevel :execute)
   (quicklisp:quickload "sqlite"))
 
 (asdf:defsystem #:pjs-sqlite

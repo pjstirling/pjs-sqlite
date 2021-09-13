@@ -9,6 +9,7 @@
 	   #:with-sqlite-statements
            #:do-sqlite-query
 	   #:do-sqlite-query*
+	   #:with-one-sqlite-row
            #:sqlite-execute-to-flat-list
            #:defsqlite-table
            #:key-in-table

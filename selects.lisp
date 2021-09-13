@@ -240,6 +240,14 @@
       (t
        (nreverse forms)))))
 
+(defun query-setup-skeleton (db sql-forms bind-forms stmt body)
+  `(with-sqlite-statements (,db (,stmt ,sql-forms))
+     ,@ (bind-parameters-form stmt
+			      bind-forms)
+     ,@ (when *enable-statement-debugging*
+	  `((dump-interpolated-statement ,stmt)))
+     ,body))
+
 (defmacro do-sqlite-query* (db sql-form &body body)
   (let ((stmt (gensym)))
     (unless (and (listp sql-form)
@@ -248,19 +256,15 @@
       (error "funny sql-form ~w" sql-form))
     (multiple-value-bind (results sql-forms bind-forms)
 	(parse-select-form sql-form)
-      `(with-sqlite-statements (,db (,stmt ,sql-forms))
-	 ,@ (bind-parameters-form stmt
-				  bind-forms)
-	 ,@ (when *enable-statement-debugging*
-	      `((dump-interpolated-statement ,stmt)))
-	 (while (sqlite:step-statement ,stmt)
-	   (let ,(loop #:for i #:from 0
-		       #:for result #:in results
-		       #:collect `(,result (sqlite:statement-column-value ,stmt ,i)))
-	     ,@body))))))
+      (query-setup-skeleton db sql-forms bind-forms stmt
+			    `(while (sqlite:step-statement ,stmt)
+			       (let ,(loop #:for i #:from 0
+					   #:for result #:in results
+					   #:collect `(,result (sqlite:statement-column-value ,stmt ,i)))
+				 ,@body))))))
 
 #+nil
-(do-sqlite-query% db
+(do-sqlite-query* db
   (:select
     (track_name
      artist_id
@@ -320,3 +324,18 @@
     (princ result)
     (princ #\;)
     (terpri)))
+
+(defmacro with-one-sqlite-row (db query &body body)
+  (let ((stmt (gensym)))
+    (multiple-value-bind (results sql-forms bind-forms)
+	(parse-select-form query)
+      (query-setup-skeleton db sql-forms bind-forms stmt
+			    `(prog2
+			         (unless (sqlite:step-statement ,stmt)
+				   (error "expected a row"))
+				 (let ,(loop #:for i #:from 0
+					     #:for result #:in results
+					     #:collect `(,result (sqlite:statement-column-value ,stmt ,i)))
+				   ,@body)
+			       (when (sqlite:step-statement ,stmt)
+				 (error "unexpected extra row")))))))

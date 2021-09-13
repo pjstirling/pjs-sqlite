@@ -14,54 +14,71 @@
 (defmacro create-sqlite-tables (db &rest tables)
   `(create-sqlite-tables-helper ,db ',tables))
 
-(defun column-is-auto-key-p (col)
-  (member :auto-key col))
+(defmacro column-is-tests (&rest content)
+  `(progn
+     ,@ (loop #:while content
+	      #:collect (let ((name (intern (string-upcase (sconc "column-is-"
+								  (pop content)
+								  "-p"))))
+			      (test (pop content)))
+			  `(defun ,name (col)
+			     ,test)))))
 
-(defun column-is-multi-key-p (col)
-  (member :pk col))
+(defmacro column-type-tests (&rest content)
+  (let ((types (dolist-c (pair (group 2 content))
+		 (collect (second pair)))))
+    `(column-is-tests
+     "legal" (member (second col) ',types)
+      ,@ (loop #:with types
+	       #:while content
+	       #:nconcing (let* ((name (pop content))
+				 (type (pop content))
+				 (test `(eq ,type
+					    (second col))))
+			    (push type types)
+			    (list name test))))))
 
-(defun column-is-key-p (col)
-  (or (column-is-auto-key-p col)
-      (column-is-multi-key-p col)))
+(defmacro column-containing-tests (&rest content)
+  `(column-is-tests
+    ,@ (loop #:while content
+	     #:nconcing (let ((name (pop content))
+			      (sym (pop content)))
+			  (list name
+				`(member ,sym (cddr col)))))))
 
-(defun column-is-bool-p (col)
-  (member :b col))
-
-(defun column-is-integer-p (col)
-  (member :i col))
-
-(defun column-is-real-p (col)
-  (eq :r (second col)))
-
-(defun column-is-text-p (col)
-  (member :t col))
-
-(defun column-is-unique-p (col)
-  (member :unique col))
-
-(defun column-is-nullable-p (col)
-  (or (member :n col)
-      (column-is-bool-p col)
-      (column-is-auto-key-p col)))
+(progn
+  (column-type-tests "auto-key" :auto-key
+		     "bool" :b
+		     "integer" :i
+		     "real" :r
+		     "text" :t
+		     "blob" :blob
+		     "atom" :atom)
+  (column-containing-tests "multi-key" :pk
+			   "unique" :u)
+  (column-is-tests "nullable" (or (member :n (cddr col))
+				  (column-is-bool-p col)
+				  (column-is-auto-key-p col))
+		   "key" (or (column-is-auto-key-p col)
+			     (column-is-multi-key-p col))
+		   "optional" (or (column-is-auto-key-p col)
+				  (column-default-value col))))
 
 (defun column-default-value (col)
-  (first-after :default col))
+  (first-after :default
+	       (cddr col)))
 	   
-(defun column-is-optional-p (col)
-  (or (column-is-auto-key-p col)
-      (column-default-value col)))
-
 (defun optional-columns (columns)
-  (remove-if-not #'column-is-optional-p columns))
+  (remove-if-not #'column-is-optional-p
+		 columns))
 
 (defun required-columns (columns)
-  (remove-if #'column-is-optional-p columns))
-
-(defun column-is-legal-p (col)
-  (only-one-of-p col '(:b :i :t :r :auto-key)))
+  (remove-if #'column-is-optional-p
+	     columns))
 
 (defun column-references-table (col)
-  (first-after :fk col))
+  (first-after :fk
+	       (cddr col)))
 
 (defun column-predicate (column)
   (symb (first column) '-p))
@@ -96,7 +113,7 @@
 	  (collect table))))))
   
 (defun sql-quote-string (s)
-  "SQL uses pascal style strings which are single-quoted. and enclosed single-quptes are doubled"
+  "SQL uses pascal style strings which are single-quoted. and enclosed single-quotes are doubled"
   (let ((result (make-array (* (length s)
 			       2)
 			    :adjustable t
@@ -132,6 +149,10 @@
 					       " CHARACTER(1) DEFAULT 'N'")
 					      ((column-is-auto-key-p col)
 					       " INTEGER PRIMARY KEY NOT NULL")
+					      ((column-is-atom-p col)
+					       " CHARACTER(25)")
+					      ((column-is-blob-p col)
+					       " BLOB")
 					      (t
 					       (error "unhandled column kind (~A)" col)))
 					    (awhen (column-default-value col)
