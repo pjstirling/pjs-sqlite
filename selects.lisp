@@ -1,11 +1,13 @@
 (in-package #:pjs-sqlite)
 
-(defun wrap-query (form param-binds)
+(defun wrap-query (form param-binds interpolate)
   `(sconc "("
-	  ,(query form param-binds)
+	  ,(query form
+		  param-binds
+		  interpolate)
 	  ")"))
 
-(defun query (form param-binds)
+(defun query (form param-binds interpolate)
   (unless (eq :select (first form))
     (error "dodgy query form ~w" form))
   (let* ((clauses (rest form))
@@ -20,7 +22,7 @@
 		"DISTINCT ")
 	     (join ", "
 		   ,@ (mapcar (lambda (form)
-				(expr form param-binds))
+				(expr form param-binds interpolate))
 			      results))
 	     ,@ (mapcar (lambda (clause)
 			  (ecase (first clause)
@@ -28,12 +30,13 @@
 			     `(sconc " FROM "
 				     (join ", "
 					   ,@ (mapcar (lambda (form)
-							(table-or-query form param-binds))
+							(table-or-query form param-binds interpolate))
 						      (rest clause)))))
 			    (:where
 			     `(sconc " WHERE "
 				     ,(expr (second clause)
-					    param-binds)))
+					    param-binds
+					    interpolate)))
 			    (:order-by
 			     `(sconc " ORDER BY "
 				     (join ", "
@@ -50,158 +53,171 @@
 			    (:group-by
 			     `(sconc " GROUP BY "
 				     ,(expr (second clause)
-					    param-binds)))
+					    param-binds
+					    interpolate)))
 			    (:limit
 			     `(sconc " LIMIT "
 				     ,(expr (second clause)
-					    param-binds)))))
+					    param-binds
+					    interpolate)))))
 			clauses))
      results)))
 
-(defun table-or-query (form param-binds)
+(defun table-or-query (form param-binds interpolate)
   (if (symbolp form)
       (sql-name form)
       ;; else
       (ecase (first form)
 	(:as
 	 `(sconc ,(table-or-query (third form)
-				  param-binds)
+				  param-binds
+				  interpolate)
 		 " AS "
 		 ,(sql-name (second form))))
 	(:select
 	  (wrap-query form
-		      param-binds))
+		      param-binds
+		      interpolate))
 	(:left-join
 	 (let ((sources (rest form))
 	       result)
 	   (push (table-or-query (pop sources)
-				 param-binds)
+				 param-binds
+				 interpolate)
 		 result)
 	   (while sources
 	     (push " LEFT JOIN "
 		   result)
 	     (push (table-or-query (pop sources)
-				   param-binds)
+				   param-binds
+				   interpolate)
 		   result)
 	     (push " ON "
 		   result)
 	     (push (expr (pop sources)
-			 param-binds)
+			 param-binds
+			 interpolate)
 		   result))
 	   `(sconc ,@ (nreverse result)))))))
 
-(defun expr (form param-binds)
-  (etypecase form
-    (symbol
-     (sql-name form))
-    (number
-     (princ-to-string form))
-    (string
-     (sql-quote-string form))
-    (cons
-     (case (first form)
-       (:as
-	(destructuring-bind (name val)
-	    (rest form)
-	  `(sconc ,(expr val
-			 param-binds)
-		  " AS "
-		  ,(sql-name name))))
-       ((+ - * / = and or < > >= <=)
-	`(join ,(sconc " "
-		       (symbol-name (first form))
-		       " ")
-	       ,@ (mapcar (lambda (form)
-			    (expr form param-binds))
-			  (rest form))))
-       ((when)
-	(destructuring-bind (test body)
-	    (rest form)
-	  (let* ((saved (length param-binds))
-		 (compiled `(when ,test
-			      ,(expr body param-binds))))
-	    (do ((p (length param-binds) (1- p)))
-		((= p saved))
-	      (symbol-macrolet ((it (aref param-binds (1- p))))
-		(setf it
-		      `(when ,test
-			 ,it))))
-	    compiled)))
-       ((null)
-	`(sconc ,(expr (second form) param-binds)
-		" IS NULL"))
-       (:var
-	 (vector-push-extend form param-binds)
-	 "?")
-       (:null=
-	(let ((name (sql-name (second form))))
-	  (vector-push-extend form param-binds)
-	  `(if ,(third form)
-	       ,(sconc name " = ?")
+(defun expr (form param-binds interpolate)
+  (flet ((interpolate-value (place)
+	   (if interpolate
+	       `(etypecase ,place
+		  (number
+		   (princ-to-string ,place))
+		  (string
+		   (sql-quote-string ,place)))
 	       ;; else
-	       ,(sconc name " IS NULL"))))
-       (:and=
-	(expr `(and ,@ (mapcar (lambda (form)
-				 `(:null= ,form ,form))
-			       (rest form)))
-	      param-binds))
-       (:like
-	`(sconc ,(expr (second form)
-		       param-binds)
-		" LIKE "
-		,(expr (third form)
-		       param-binds)))
-       (:exists
-	`(sconc "EXISTS ("
-		,(query (second form)
-			param-binds)
-		")"))
-       (t
-	`(sconc ,(symbol-name (first form))
-		"("
-		(join ", "
-		      ,@ (mapcar (lambda (form)
-				   (expr form param-binds))
+	       "?")))
+    (etypecase form
+      (symbol
+       (sql-name form))
+      (number
+       (princ-to-string form))
+      (string
+       (sql-quote-string form))
+      (cons
+       (case (first form)
+	 (:as
+	  (destructuring-bind (name val)
+	      (rest form)
+	    `(sconc ,(expr val
+			   param-binds
+			   interpolate)
+		    " AS "
+		    ,(sql-name name))))
+	 ((+ - * / = and or < > >= <=)
+	  `(join ,(sconc " "
+			 (symbol-name (first form))
+			 " ")
+		 ,@ (mapcar (lambda (form)
+			      (expr form
+				    param-binds
+				    interpolate))
+			    (rest form))))
+	 ((when)
+	  (destructuring-bind (test body)
+	      (rest form)
+	    (let* ((saved (length param-binds))
+		   (compiled `(when ,test
+				,(expr body
+				       param-binds
+				       interpolate))))
+	      (do ((p (length param-binds) (1- p)))
+		  ((= p saved))
+		(symbol-macrolet ((it (aref param-binds (1- p))))
+		  (setf it
+			`(when ,test
+			   ,it))))
+	      compiled)))
+	 ((null)
+	  `(sconc ,(expr (second form)
+			 param-binds
+			 interpolate)
+		  " IS NULL"))
+	 (:var
+	   (vector-push-extend form param-binds)
+	   (interpolate-value (second form)))
+	 (:null=
+	  (let ((name (sql-name (second form))))
+	    (vector-push-extend form param-binds)
+	    `(if ,(third form)
+		 (sconc ,name
+			" = "
+			,(interpolate-value (third form)))
+		 ;; else
+		 ,(sconc name " IS NULL"))))
+	 (:and=
+	  (expr `(and ,@ (mapcar (lambda (form)
+				   `(:null= ,form ,form))
 				 (rest form)))
-		")"))))))
+		param-binds
+		interpolate))
+	 (:like
+	  `(sconc ,(expr (second form)
+			 param-binds
+			 interpolate)
+		  " LIKE "
+		  ,(expr (third form)
+			 param-binds
+			 interpolate)))
+	 (:exists
+	  `(sconc "EXISTS ("
+		  ,(query (second form)
+			  param-binds
+			  interpolate)
+		  ")"))
+	 (t
+	  `(sconc ,(symbol-name (first form))
+		  "("
+		  (join ", "
+			,@ (mapcar (lambda (form)
+				     (expr form
+					   param-binds
+					   interpolate))
+				   (rest form)))
+		  ")")))))))
 
 (defun parse-select-form (sql)
-  (let ((param-binds (make-array 1 :fill-pointer 0 :adjustable t)))
-    (multiple-value-bind (sql-forms results)
-	(query sql param-binds)
-      (values (mapcar (lambda (result)
-			(if (listp result)
-			    (progn
-			      (unless (eq (first result)
-					  :as)
-				(error "funny result ~a" result))
-			      (second result))
-			    ;; else
-			    result))
-		      results)
-	      sql-forms
-	      param-binds))))
-
-(defparameter *enable-statement-debugging*
-  nil)
-
-(defparameter *statement-debugging-parameters*
-  nil)
-
-(defmacro bind-parameter (stmt index value)
-  (if *enable-statement-debugging*
-      (bind ((:symbols stmt-place index-place value-place))
-	`(let* ((,stmt-place ,stmt)
-		(,index-place ,index)
-		(,value-place ,value))
-	   (sqlite:bind-parameter ,stmt-place
-				  ,index-place
-				  ,value-place)
-	   (push (list ,index-place
-		       ,value-place)
-		 *statement-debugging-parameters*)))
-      ;; else
-      `(sqlite:bind-parameter ,stmt ,index ,value)))
+  (flet ((arr ()
+	   (make-array 1 :fill-pointer 0 :adjustable t)))
+    (let ((param-binds (arr)))
+      (multiple-value-bind (sql-forms results)
+	  (query sql param-binds nil)
+	(values (mapcar (lambda (result)
+			  (if (listp result)
+			      (progn
+				(unless (eq (first result)
+					    :as)
+				  (error "funny result ~a" result))
+				(second result))
+			      ;; else
+			      result))
+			results)
+		sql-forms
+		param-binds
+		(query sql (arr) t))))))
 
 (defun bind-parameters-form (stmt param-binds)
   (let (forms
@@ -211,7 +227,7 @@
 		(eq :var
 		    (first (aref param-binds index))))
       (let ((param (aref param-binds index)))
-	(push `(bind-parameter ,stmt ,(1+ index) ,(second param))
+	(push `(sqlite:bind-parameter ,stmt ,(1+ index) ,(second param))
 	      forms)
 	(incf index)))
     (cond
@@ -221,11 +237,11 @@
 	 (labels ((handle-bind (param)
 		    (ecase (first param)
 		      (:var
-			`((bind-parameter ,stmt ,run-index ,(second param))
+			`((sqlite:bind-parameter ,stmt ,run-index ,(second param))
 			  (incf ,run-index)))
 		      (:null=
 		       `((when ,(third param)
-			   (bind-parameter ,stmt ,run-index ,(third param))
+			   (sqlite:bind-parameter ,stmt ,run-index ,(third param))
 			   ,(when param-binds
 			      `(incf ,run-index)))))
 		      ((when)
@@ -244,9 +260,13 @@
   `(with-sqlite-statements (,db (,stmt ,sql-forms))
      ,@ (bind-parameters-form stmt
 			      bind-forms)
-     ,@ (when *enable-statement-debugging*
-	  `((dump-interpolated-statement ,stmt)))
      ,body))
+
+(defmacro with-statement-results (stmt results &body body)
+  `(let ,(loop #:for i #:from 0
+	       #:for result #:in results
+	       #:collect `(,result (sqlite:statement-column-value ,stmt ,i)))
+     ,@body))
 
 (defmacro do-sqlite-query* (db sql-form &body body)
   (let ((stmt (gensym)))
@@ -258,9 +278,7 @@
 	(parse-select-form sql-form)
       (query-setup-skeleton db sql-forms bind-forms stmt
 			    `(while (sqlite:step-statement ,stmt)
-			       (let ,(loop #:for i #:from 0
-					   #:for result #:in results
-					   #:collect `(,result (sqlite:statement-column-value ,stmt ,i)))
+			       (with-statement-results ,stmt ,results
 				 ,@body))))))
 
 #+nil
@@ -296,46 +314,41 @@
      (:null= tracks.id id)))
   foo)
 
-(defun dump-interpolated-statement (stmt)
-  (let* ((parts (explode "?"
-			 (sqlite::sql stmt)))
-	 (result (pop parts))
-	 (highest (apply #'max
-			 (mapcar #'first
-				 *statement-debugging-parameters*)))
-	 (vec (make-array highest)))
-    (dolist (el *statement-debugging-parameters*)
-      (setf (aref vec (1- (first el)))
-	    (second el)))
-    (dovector (el vec)
-      (setf result
-	    (sconc result
-		   (if (stringp el)
-		       (sconc "'"
-			      (apply #'join
-				     "''"
-				     (explode "'" el))
-			      "'")
-		       ;; else
-		       (format nil "~w" el))
-		   (pop parts))))
-    (setf *statement-debugging-parameters*
-	  nil)
-    (princ result)
-    (princ #\;)
-    (terpri)))
-
-(defmacro with-one-sqlite-row (db query &body body)
+(defmacro if-sqlite-query (db query yes no)
   (let ((stmt (gensym)))
-    (multiple-value-bind (results sql-forms bind-forms)
+    (multiple-value-bind (results sql-forms bind-forms interpolated)
 	(parse-select-form query)
       (query-setup-skeleton db sql-forms bind-forms stmt
-			    `(prog2
-			         (unless (sqlite:step-statement ,stmt)
-				   (error "expected a row"))
-				 (let ,(loop #:for i #:from 0
-					     #:for result #:in results
-					     #:collect `(,result (sqlite:statement-column-value ,stmt ,i)))
-				   ,@body)
-			       (when (sqlite:step-statement ,stmt)
-				 (error "unexpected extra row")))))))
+			    `(if (sqlite:step-statement ,stmt)
+				 (with-statement-results ,stmt ,results
+				   (prog1
+				       ,yes
+				     (when (sqlite:step-statement ,stmt)
+				       (error "unexpected extra row ~a" ,interpolated))))
+				 ;; else
+				 ,no)))))
+
+(defmacro with-one-sqlite-row (db query &body body)
+  (multiple-value-bind (results sql-forms bind-forms interpolated)
+      (parse-select-form query)
+    (declare (ignore results sql-forms bind-forms))
+    `(if-sqlite-query ,db ,query
+		      (progn
+			,@body)
+		      ;; else
+		      (error "no row matched ~a" ,interpolated))))
+
+
+
+(defmacro with-sqlite-queries* ((db &body queries) &body body)
+  `(flet ,(mapcar (lambda (query)
+		    (bind ((:db (name sql)
+				query)
+			   (:mv (results sql-forms- bind-forms)
+				(parse-select-form sql)))
+		      `(,name ,(map 'list #'second bind-forms)
+			      (with-one-sqlite-row ,db
+				  ,sql
+				(values ,@results)))))
+	   queries)
+     ,@body))
