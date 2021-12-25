@@ -7,61 +7,65 @@
 		  interpolate)
 	  ")"))
 
+(defmacro with-query-parts ((distinct results others) query &body body)
+  (unless (eq (first query)
+	      :select)
+    (error "bad select form ~a" query))
+  `(destructuring-bind (,results &rest ,others)
+       ,(rest query)
+     (let (,distinct)
+       (when (eq :distinct ,results)
+	 (setf ,distinct :distinct)
+	 (setf ,results (pop ,others)))
+       ,@body)))
+
 (defun query (form param-binds interpolate)
-  (unless (eq :select (first form))
-    (error "dodgy query form ~w" form))
-  (let* ((clauses (rest form))
-	 (results (pop clauses))
-	 distinct)
-    (when (eq :distinct results)
-      (setf distinct t)
-      (setf results (pop clauses)))
-    (values
-     `(sconc "SELECT "
-	     ,(when distinct
-		"DISTINCT ")
-	     (join ", "
-		   ,@ (mapcar (lambda (form)
-				(expr form param-binds interpolate))
-			      results))
-	     ,@ (mapcar (lambda (clause)
-			  (ecase (first clause)
-			    (:from
-			     `(sconc " FROM "
-				     (join ", "
-					   ,@ (mapcar (lambda (form)
-							(table-or-query form param-binds interpolate))
-						      (rest clause)))))
-			    (:where
-			     `(sconc " WHERE "
-				     ,(expr (second clause)
-					    param-binds
-					    interpolate)))
-			    (:order-by
-			     `(sconc " ORDER BY "
-				     (join ", "
-					   ,@ (mapcar (lambda (form)
-							(if (listp form)
-							    (destructuring-bind (ordering term)
-								form
-							      (sconc (sql-name term)
-								     " "
-								     (symbol-name ordering)))
-							    ;; else
-							    (sql-name form)))
-						      (rest clause)))))
-			    (:group-by
-			     `(sconc " GROUP BY "
-				     ,(expr (second clause)
-					    param-binds
-					    interpolate)))
-			    (:limit
-			     `(sconc " LIMIT "
-				     ,(expr (second clause)
-					    param-binds
-					    interpolate)))))
-			clauses))
-     results)))
+  (with-query-parts (distinct results clauses)
+		    form
+    `(sconc "SELECT "
+	    ,(when distinct
+	       "DISTINCT ")
+	    (join ", "
+		  ,@ (mapcar (lambda (form)
+			       (expr form param-binds interpolate))
+			     results))
+	    ,@ (mapcar (lambda (clause)
+			 (ecase (first clause)
+			   (:from
+			    `(sconc " FROM "
+				    (join ", "
+					  ,@ (mapcar (lambda (form)
+						       (table-or-query form param-binds interpolate))
+						     (rest clause)))))
+			   (:where
+			    `(sconc " WHERE "
+				    ,(expr (second clause)
+					   param-binds
+					   interpolate)))
+			   (:order-by
+			    `(sconc " ORDER BY "
+				    (join ", "
+					  ,@ (mapcar (lambda (form)
+						       (if (listp form)
+							   (destructuring-bind (ordering term)
+							       form
+							     (sconc (sql-name term)
+								    " "
+								    (symbol-name ordering)))
+							   ;; else
+							   (sql-name form)))
+						     (rest clause)))))
+			   (:group-by
+			    `(sconc " GROUP BY "
+				    ,(expr (second clause)
+					   param-binds
+					   interpolate)))
+			   (:limit
+			    `(sconc " LIMIT "
+				    ,(expr (second clause)
+					   param-binds
+					   interpolate)))))
+		       clauses))))
 
 (defun table-or-query (form param-binds interpolate)
   (if (symbolp form)
@@ -200,24 +204,38 @@
 		  ")")))))))
 
 (defun parse-select-form (sql)
-  (flet ((arr ()
-	   (make-array 1 :fill-pointer 0 :adjustable t)))
-    (let ((param-binds (arr)))
-      (multiple-value-bind (sql-forms results)
-	  (query sql param-binds nil)
-	(values (mapcar (lambda (result)
-			  (if (listp result)
-			      (progn
-				(unless (eq (first result)
-					    :as)
-				  (error "funny result ~a" result))
-				(second result))
-			      ;; else
-			      result))
-			results)
-		sql-forms
-		param-binds
-		(query sql (arr) t))))))
+  (let (names)
+    (flet ((arr ()
+	     (make-array 1 :fill-pointer 0 :adjustable t))
+	   (rewrite-results ()
+	     (with-query-parts (distinct results others)
+			       sql
+	       `(:select
+		  ,@ (when distinct
+		       '(:distinct))
+		  ,(mapcar (lambda (result)
+			     (if (listp result)
+				 (destructuring-bind (a name thing)
+				     result
+				   (assert (eq a :as))
+				   (push name names)
+				   thing)
+				 ;; else
+				 result))
+			   results)
+		  ,@others))))
+      (let* ((param-binds (arr))
+	     (rewritten (rewrite-results))
+	     (sql-forms (query rewritten
+			       param-binds
+			       nil)))
+	(values
+	 (nreverse names)
+	 sql-forms
+	 param-binds
+	 (query rewritten
+		(arr)
+		t))))))
 
 (defun bind-parameters-form (stmt param-binds)
   (let (forms
