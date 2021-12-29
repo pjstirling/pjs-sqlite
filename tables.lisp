@@ -3,17 +3,6 @@
 (defparameter *sqlite-tables*
   (make-hash-table))
 
-(defparameter *sqlite-table-dependencies*
-  (make-hash-table))
-
-(defun create-sqlite-tables-helper (db symbols)
-  (dolist (sym symbols)
-    (let ((fn (gethash sym *sqlite-tables*)))
-      (funcall fn db))))
-
-(defmacro create-sqlite-tables (db &rest tables)
-  `(create-sqlite-tables-helper ,db ',tables))
-
 (defmacro column-is-tests (&rest content)
   `(progn
      ,@ (loop #:while content
@@ -207,73 +196,47 @@
 				   "'")))
 
 (defun defsqlite-table-creator (name columns)
-  `(defun ,(create-table-function-name name) (db recursive log)
+  `(defun ,(create-table-function-name name) (db log)
      (flet ((log-message (datum fmt &rest args)
 	      (apply #'format t fmt args)
 	      (apply log datum fmt args)))
-       (when (member ',name recursive)
-	 (log-message "table reference loop ~a" recursive)
-	 (error "table reference loop ~a" recursive))
-       
-       (push ',name recursive)
-       
-       (let (dep-changed)
-	 (dolist (table ',(table-dependencies name columns))
-	   (setf dep-changed (or dep-changed
-				 (funcall (gethash table *sqlite-tables*)
-					  db
-					  recursive
-					  log))))
-	 
-	 (let* ((table-schema (sqlite:execute-single db ,(sconc "SELECT sql FROM sqlite_master WHERE type = 'table' AND tbl_name = '"
-								(sql-name name)
-								"'")))
-		(need-to-migrate (and table-schema
-				      (string/= table-schema 
-						,(create-table-sql-name name)))))
-	   (when (or (not table-schema)
-		     need-to-migrate
-		     dep-changed)
-	     (when need-to-migrate
-	       (log-message 'message
-			    ,(sconc "TABLE SQL FOR '"
-				    (sql-name name)
-				    "' DIFFERS, ATTEMPTING MIGRATION~%")))
-	     
-	     (when table-schema
-	       (log-message 'message "Old schema was: ~w~%New schema is: ~w~%" table-schema ,(create-table-sql-name name))
-	       (with-foreign-keys-disabled db
-		 (sqlite:execute-non-query db ,(sconc "ALTER TABLE " 
-						      (sql-name name)
-						      " RENAME TO " (temporary-table-name name)))))
-	     
-	     (sqlite:execute-non-query db ,(create-table-sql-name name))		   
-	     ,@(mapcar (lambda (col)
-			 `(create-index db ,name ,(first col)))
-		       (remove-if-not #'column-references-table
-				      columns))
-	     
-	     (when table-schema
-	       (if (migrate-table-data db ,(temporary-table-name name) ,(sql-name name))
-		   (progn
-		     (when need-to-migrate
-		       (log-message 'message ,(sconc "AUTOMATED MIGRATION SUCCEEDED, APPARENTLY~%"))
-		       
-		       ;; (maphash (lambda (table dependencies)
-		       ;; 		(when (member ',name dependencies)
-		       ;; 		  (funcall (gethash table *sqlite-tables*)
-		       ;; 			   db
-		       ;; 			   nil)))
-		       ;; 	      *sqlite-table-dependencies*)
-		       
-		       (sqlite:execute-non-query db ,(sconc "DROP TABLE "
-							    (temporary-table-name name)))))
-		   ;; else
-		   (progn
-		     (log-message 'error "AUTOMATED MIGRATION FAILED, HERE BE DRAGONS!~%")
-		     (error ,(sconc "can't migrate table " (sql-name name)))))
-	       ;; db was changed in some way
-	       t)))))))
+       (let* ((table-schema (sqlite:execute-single db ,(sconc "SELECT sql FROM sqlite_master WHERE type = 'table' AND tbl_name = '"
+							      (sql-name name)
+							      "'")))
+	      (need-to-migrate (and table-schema
+				    (string/= table-schema
+					      ,(create-table-sql-name name)))))
+	 (when (or (not table-schema)
+		   need-to-migrate)
+	   (when need-to-migrate
+	     (log-message 'message
+			  ,(sconc "TABLE SQL FOR '"
+				  (sql-name name)
+				  "' DIFFERS, ATTEMPTING MIGRATION~%")))
+	   (when table-schema
+	     (log-message 'message "Old schema was: ~w~%New schema is: ~w~%" table-schema ,(create-table-sql-name name))
+	     (with-foreign-keys-disabled db
+	       (sqlite:execute-non-query db ,(sconc "ALTER TABLE "
+						    (sql-name name)
+						    " RENAME TO " (temporary-table-name name)))))
+	   (sqlite:execute-non-query db ,(create-table-sql-name name))
+	   ,@(mapcar (lambda (col)
+		       `(create-index db ,name ,(first col)))
+		     (remove-if-not #'column-references-table
+				    columns))
+	   (when table-schema
+	     (if (migrate-table-data db ,(temporary-table-name name) ,(sql-name name))
+		 (progn
+		   (when need-to-migrate
+		     (log-message 'message ,(sconc "AUTOMATED MIGRATION SUCCEEDED, APPARENTLY~%"))
+		     (sqlite:execute-non-query db ,(sconc "DROP TABLE "
+							  (temporary-table-name name)))))
+		 ;; else
+		 (progn
+		   (log-message 'error "AUTOMATED MIGRATION FAILED, HERE BE DRAGONS!~%")
+		   (error ,(sconc "can't migrate table " (sql-name name)))))
+	     ;; db was changed in some way
+	     t))))))
 
 (defun defsqlite-table-inserter (name columns)
   (multiple-value-bind (optional-columns required-columns)
@@ -416,80 +379,34 @@
 ;; ========================================================
 
 (defmacro defsqlite-table (name &body columns)
-  (let ((*print-case* :upcase))
+  (let ((creator (create-table-function-name name))
+	(*print-case* :upcase))
     `(progn
        (defparameter ,(create-table-sql-name name)
 	 ,(build-create-table-sql name columns))
        ;;
        ,(defsqlite-table-creator name columns)
        ;;
-       (eval-when (:load-toplevel)
-	 (setf (gethash ',name *sqlite-tables*) #',(create-table-function-name name))
-	 ;; so we can rebuild dependant tables after migration
-	 (setf (gethash ',name *sqlite-table-dependencies*)
-	       ',(table-dependencies name columns)))
+       (pushnew ',creator
+		(gethash ,(symbol-package creator)
+			 *sqlite-tables*))
        ;;
        ,(defsqlite-table-inserter name columns)
        ,(defsqlite-table-updater name columns)
        ,(defsqlite-table-deleter name columns))))
 
+;; ========================================================
+;;
+;; ========================================================
+
 (defun create-all-tables (db log package)
-  (let ((package (find-package package)))
-    (maphash (lambda (table fn)
-	       (when (eq (symbol-package table)
-			 package)
-		 (funcall fn db nil log)))
-	     *sqlite-tables*)))
+  (let* ((package (find-package package))
+	 (creators (gethash package *sqlite-tables*)))
+    (dolist (creator (reverse creators))
+      (funcall creator db log))))
 
 ;; ========================================================
 ;;
 ;; ========================================================
 
-(defun sort-tables ()
-  (let (sorted
-	tables)
-    (maphash (lambda (key value)
-	       (push (cons key value)
-		     tables))
-	     *sqlite-table-dependencies*)
-    (while tables
-      (block outer
-	(dolist (table tables)
-	  (when (null (rest table))
-	    (let ((table-name (first table)))
-	      (setf tables (remove table tables))
-	      (push table-name sorted)
-	      (setf tables (mapcar (lambda (table)
-				     (remove table-name table))
-				   tables))
-	      (return-from outer))))
-	(error "reached end of block without finding a no-dependencies table: ~w" tables)))
-    (nreverse sorted)))
 
-(defun remove-whitespace (str)
-  (let ((result (make-array (length str) :element-type 'character :fill-pointer 0)))
-    (dotimes (i (length str))
-      (let ((ch (char str i)))
-	(unless (member ch '(#\Space #\Tab #\Return #\Newline))
-	  (vector-push ch result))))
-    result))
-
-(defun munge-tables (db)
-  (let ((sorted (sort-tables)))
-    (sqlite:with-transaction db
-      (dolist (table sorted)
-	(let* ((table-name (sql-name table))
-	       (create-table-sql (symbol-value (create-table-sql-name table)))
-	       (table-schema (table-schema-from-db db table)))
-	  (unless (string= (remove-whitespace create-table-sql)
-			   (remove-whitespace table-schema))
-	    (format t "schema mis-match:~%  OLD: ~w~%  NEW: ~W~%" table-schema create-table-sql))
-	  (when table-schema
-	    (sqlite:execute-non-query db (sconc "ALTER TABLE " table-name " RENAME TO " (temporary-table-name table))))
-	  (sqlite:execute-non-query db create-table-sql)
-	  (when table-schema
-	    (migrate-table-data db (temporary-table-name table) table-name))
-	  (unless table-schema
-	    (sqlite:execute-non-query db (sconc "CREATE TABLE " (temporary-table-name table) " AS SELECT * FROM " table-name)))))
-      (dolist (table (reverse sorted))
-	(sqlite:execute-non-query db (sconc "DROP TABLE " (temporary-table-name table)))))))
