@@ -8,16 +8,17 @@
 	  ")"))
 
 (defmacro with-query-parts ((distinct results others) query &body body)
-  (unless (eq (first query)
-	      :select)
-    (error "bad select form ~a" query))
-  `(destructuring-bind (,results &rest ,others)
-       ,(rest query)
-     (let (,distinct)
-       (when (eq :distinct ,results)
-	 (setf ,distinct :distinct)
-	 (setf ,results (pop ,others)))
-       ,@body)))
+  `(progn
+     (unless (eq (first ,query)
+		 :select)
+       (error "bad select form ~a" ,query))
+     (destructuring-bind (,results &rest ,others)
+	 (rest ,query)
+       (let (,distinct)
+	 (when (eq :distinct ,results)
+	   (setf ,distinct :distinct)
+	   (setf ,results (pop ,others)))
+	 ,@body))))
 
 (defun query (form param-binds interpolate)
   (with-query-parts (distinct results clauses)
@@ -221,7 +222,9 @@
 				   (push name names)
 				   thing)
 				 ;; else
-				 result))
+				 (progn
+				   (push result names)
+				   result)))
 			   results)
 		  ,@others))))
       (let* ((param-binds (arr))
