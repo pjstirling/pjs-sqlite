@@ -42,35 +42,26 @@
 		     "real" :r
 		     "text" :t
 		     "blob" :blob
-		     "atom" :atom)
+		     "atom" :atom
+		     "last-modified" :modified)
   (column-containing-tests "multi-key" :pk
 			   "unique" :u)
-  (column-is-tests "nullable" (or (member :n (cddr col))
-				  (column-is-bool-p col)
-				  (column-is-auto-key-p col))
+  (column-is-tests "nullable" (member :n (cddr col))
 		   "key" (or (column-is-auto-key-p col)
 			     (column-is-multi-key-p col))
-		   "optional" (or (column-is-auto-key-p col)
-				  (column-default-value col))))
+		   "optional" (or (column-default-value col)
+				  (column-is-last-modified-p col))))
 
 (defun column-default-value (col)
   (first-after :default
 	       (cddr col)))
 	   
-(defun optional-columns (columns)
-  (remove-if-not #'column-is-optional-p
-		 columns))
-
-(defun required-columns (columns)
-  (remove-if #'column-is-optional-p
-	     columns))
-
 (defun column-references-table (col)
   (first-after :fk
 	       (cddr col)))
 
 (defun column-predicate (column)
-  (symb (first column) '-p))
+  (symb (first column) "-p"))
 
 (defun column-bind (name col index)
   (let* ((col-name (first col))
@@ -91,16 +82,6 @@
 			    "."
 			    (sql-name col-name)))))))
 
-(defun table-dependencies (name columns)
-  (dolist-c (col columns)
-    (awhen (column-references-table col)
-      (let ((table (if (listp it)
-		       (first it)
-		       ;; else
-		       it)))
-	(unless (eq name table)
-	  (collect table))))))
-  
 (defun sql-quote-string (s)
   "SQL uses pascal style strings which are single-quoted. and enclosed single-quotes are doubled"
   (let ((result (make-array (* (length s)
@@ -137,11 +118,13 @@
 					      ((column-is-bool-p col)
 					       " CHARACTER(1) DEFAULT 'N'")
 					      ((column-is-auto-key-p col)
-					       " INTEGER PRIMARY KEY NOT NULL")
+					       " INTEGER PRIMARY KEY")
 					      ((column-is-atom-p col)
 					       " CHARACTER(25)")
 					      ((column-is-blob-p col)
 					       " BLOB")
+					      ((column-is-last-modified-p col)
+					       " CHARACTER(25) DEFAULT CURRENT_TIMESTAMP")
 					      (t
 					       (error "unhandled column kind (~A)" col)))
 					    (awhen (column-default-value col)
@@ -182,10 +165,10 @@
 			   " )"))))))
 
 (defun create-table-function-name (name)
-  (symb 'create- name '-table))
+  (symb "create-" name "-table"))
 
 (defun create-table-sql-name (name)
-  (symb '+create- name '-sql+))
+  (symb "+create-" name "-sql+"))
 
 (defun temporary-table-name (name)
   (sconc (sql-name name) "_temp"))
@@ -240,13 +223,15 @@
 
 (defun defsqlite-table-inserter (name columns)
   (multiple-value-bind (optional-columns required-columns)
-      (partition #'column-is-optional-p columns)
-    `(defun ,(symb 'insert- name) (db 
+      (partition (lambda (col)
+		   (or (column-is-optional-p col)
+		       (column-is-auto-key-p col))) columns)
+    `(defun ,(symb "insert-" name) (db
 				   ,@(mapcar #'first required-columns)
 				   &key ,@(mapcar #'(lambda (col)
 						      (list (first col)
 							    nil
-							    (symb (first col) '-p)))
+							    (column-predicate col)))
 						  optional-columns))
        (with-sqlite-statements (db
 				 (stmt (sconc "INSERT INTO "
@@ -259,7 +244,7 @@
 								      (sql-name (first x)))
 								    required-columns))
 						    ,@(mapcar (lambda (col)
-								`(when ,(symb (first col) '-p)
+								`(when ,(column-predicate col)
 								   ,(sql-name (first col))))
 							      optional-columns))
 					      " ) VALUES ( "
@@ -269,21 +254,19 @@
 							    (n-copies (length required-columns)
 								      "?"))
 						    ,@(mapcar #'(lambda (col)
-								  `(when ,(symb (first col) '-p)
+								  `(when ,(column-predicate col)
 								     "?"))
 							      optional-columns))
 					      " )")))
-	 ;; loop for each column, bind-parameter starts at 1
-	 ,@(let ((index 1))
-	     (mapcar #'(lambda (col)
-			 (column-bind name col (1++ index)))
-		     required-columns))
+	 ;; loop for each column, bind-parameter starts at 1 but we incf
+	 ,@ (loop #:for i from 1
+		  #:for col in required-columns
+		  #:collect (column-bind name col i))
 	 ,(when optional-columns
-	    `(let ((index ,(1+ (length required-columns))))
+	    `(let ((index ,(length required-columns)))
 	       ,@(mapcar #'(lambda (col)
-			     `(when ,(symb (first col) '-p)
-				,(column-bind name col 'index)
-				(incf index)))
+			     `(when ,(column-predicate col)
+				,(column-bind name col '(incf index))))
 			 optional-columns)))
 	 ;; stmt from preamble
 	 (sqlite:step-statement stmt)
@@ -291,51 +274,62 @@
 	 (sqlite:last-insert-rowid db)))))
 
 (defun defsqlite-table-updater (name columns)
-  (let ((key-columns (remove-if-not #'column-is-key-p columns))
-	(non-key-columns (remove-if #'column-is-key-p columns)))
+  (multiple-value-bind (key-columns non-key-columns)
+      (partition #'column-is-key-p columns)
     (if (and key-columns non-key-columns)
-	`(defun ,(symb 'update- name) (db
-				       ,@(mapcar #'first key-columns)
-				       &key
-				       ,@(mapcar (lambda (col)
-						   `(,(first col) nil ,(column-predicate col)))
-						 non-key-columns))
-	   (with-sqlite-statements (db
-				     (stmt (sconc "UPDATE "
-						  ,(sql-name name)
-						  " SET "
-						  (join ", "
-							,@(mapcar (lambda (col)
-								    `(when ,(column-predicate col)
-								       ,(sconc (sql-name (first col)) " = ?")))
-								  non-key-columns))
-						  " WHERE "
-						  (join " AND "
-							,@(mapcar (lambda (col)
-								    (let ((name (sql-name (first col))))
-								      (if (column-is-nullable-p col)
-									  `(if ,(first col)
-									       ,(sconc name " = ?")
-									       ;; else
-									       ,(sconc name " IS NULL"))
-									  ;; else
-									  (sconc name " = ?"))))
-								  key-columns)))))
-	     (let ((index 1))
-	       ,@(mapcar (lambda (col)
-			   `(when ,(column-predicate col)
-			      ,(column-bind name col '(1++ index))))
-			 non-key-columns)
-	       ,@(mapcar (lambda (col)
-			   (column-bind name col '(1++ index)))
-			 key-columns)
-	       (sqlite:step-statement stmt))))
+	(multiple-value-bind (last-modified-columns normal-non-key-columns)
+	    (partition #'column-is-last-modified-p non-key-columns)
+	  `(defun ,(symb "update-" name) (db
+					 ,@(mapcar #'first key-columns)
+					 &key
+					   ,@(mapcar (lambda (col)
+						       `(,(first col) nil ,(column-predicate col)))
+						     non-key-columns))
+	     (with-sqlite-statements (db
+				       (stmt (sconc "UPDATE "
+						    ,(sql-name name)
+						    " SET "
+						    (join ", "
+							  ,@(mapcar (lambda (col)
+								      `(when ,(column-predicate col)
+									 ,(sconc (sql-name (first col)) " = ?")))
+								    normal-non-key-columns)
+							  ,@ (mapcar (lambda (col)
+								       `(if ,(column-predicate col)
+									    ,(sconc (sql-name (first col)) " = ?")
+									    ,(sconc (sql-name (first col)) " = CURRENT_TIMESTAMP")))
+								     last-modified-columns))
+						    " WHERE "
+						    (join " AND "
+							  ,@(mapcar (lambda (col)
+								      (let ((name (sql-name (first col))))
+									(if (column-is-nullable-p col)
+									    `(if ,(first col)
+										 ,(sconc name " = ?")
+										 ;; else
+										 ,(sconc name " IS NULL"))
+									    ;; else
+									    (sconc name " = ?"))))
+								    key-columns)))))
+	       ;; column-bind uses 1 for the first index, but we INCF
+	       (let ((index 0))
+		 ,@(mapcar (lambda (col)
+			     `(when ,(column-predicate col)
+				,(column-bind name col '(incf index))))
+			   (append normal-non-key-columns
+				   last-modified-columns))
+		 ,@(mapcar (lambda (col)
+			     (column-bind name col '(incf index)))
+			   key-columns)
+		 (sqlite:step-statement stmt)))))
 	;; else
 	(format *error-output*
-		"~&not generating update-~a because it has no ~a~%" name (if key-columns
-									 "non-keys to update"
-									 ;; else
-									 "no keys to select a row")))))
+		"~&not generating update-~a because it has no ~a~%"
+		name
+		(if key-columns
+		    "non-keys to update"
+		    ;; else
+		    "no keys to select a row")))))
 
 (defun defsqlite-table-deleter (name columns)
   (let ((key-columns (mapcar #'(lambda (col)
@@ -344,7 +338,7 @@
 					   (column-is-bool-p col))))
 			     (remove-if-not #'column-is-key-p columns))))
     (if key-columns
-	`(defun ,(symb 'delete- name) (db ,@(mapcar #'first key-columns))
+	`(defun ,(symb "delete-" name) (db ,@(mapcar #'first key-columns))
 	   (with-sqlite-statements (db
 				     (stmt (sconc "DELETE FROM "
 						  ,(sql-name name)
