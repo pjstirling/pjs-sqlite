@@ -179,47 +179,74 @@
 				   "'")))
 
 (defun defsqlite-table-creator (name columns)
-  `(defun ,(create-table-function-name name) (db log)
-     (flet ((log-message (datum fmt &rest args)
-	      (apply #'format t fmt args)
-	      (apply log datum fmt args)))
-       (let* ((table-schema (sqlite:execute-single db ,(sconc "SELECT sql FROM sqlite_master WHERE type = 'table' AND tbl_name = '"
-							      (sql-name name)
-							      "'")))
-	      (need-to-migrate (and table-schema
-				    (string/= table-schema
-					      ,(create-table-sql-name name)))))
-	 (when (or (not table-schema)
-		   need-to-migrate)
-	   (when need-to-migrate
-	     (log-message 'message
-			  ,(sconc "TABLE SQL FOR '"
-				  (sql-name name)
-				  "' DIFFERS, ATTEMPTING MIGRATION~%")))
-	   (when table-schema
-	     (log-message 'message "Old schema was: ~w~%New schema is: ~w~%" table-schema ,(create-table-sql-name name))
-	     (with-foreign-keys-disabled db
-	       (sqlite:execute-non-query db ,(sconc "ALTER TABLE "
-						    (sql-name name)
-						    " RENAME TO " (temporary-table-name name)))))
-	   (sqlite:execute-non-query db ,(create-table-sql-name name))
-	   ,@(mapcar (lambda (col)
-		       `(create-index db ,name ,(first col)))
-		     (remove-if-not #'column-references-table
-				    columns))
-	   (when table-schema
-	     (if (migrate-table-data db ,(temporary-table-name name) ,(sql-name name))
-		 (progn
-		   (when need-to-migrate
-		     (log-message 'message ,(sconc "AUTOMATED MIGRATION SUCCEEDED, APPARENTLY~%"))
-		     (sqlite:execute-non-query db ,(sconc "DROP TABLE "
-							  (temporary-table-name name)))))
-		 ;; else
-		 (progn
-		   (log-message 'error "AUTOMATED MIGRATION FAILED, HERE BE DRAGONS!~%")
-		   (error ,(sconc "can't migrate table " (sql-name name)))))
-	     ;; db was changed in some way
-	     t))))))
+  (let ((create-sql-name (create-table-sql-name name))
+	(sql-name (sql-name name))
+	(temporary-table-name (temporary-table-name name)))
+    `(defun ,(create-table-function-name name) (db log)
+       (flet ((log-message (datum fmt &rest args)
+		(apply #'format t fmt args)
+		(apply log datum fmt args)))
+	 (let ((table-schema (sqlite:execute-single db
+						    ,(sconc "SELECT sql FROM sqlite_master WHERE type = 'table' AND tbl_name = '"
+							    sql-name
+							    "'"))))
+	   (labels ((create-table ()
+		      (sqlite:execute-non-query db
+						,create-sql-name)
+		      ,@(mapcar (lambda (col)
+				  `(create-index db ,name ,(first col)))
+				(remove-if-not #'column-references-table
+					       columns))))
+	     (cond
+	       ((not table-schema)
+		(create-table))
+	       ((string= table-schema
+			 ,create-sql-name)
+		;; nothing to do
+		nil)
+	       (t
+		(log-message 'message
+			     ,(sconc "TABLE SQL FOR '"
+				     sql-name
+				     "' DIFFERS, ATTEMPTING MIGRATION~%"))
+		(log-message 'message
+			     "Old schema was: ~w~%New schema is: ~w~%"
+			     table-schema
+			     ,create-sql-name)
+		(let (success
+		      made-table)
+		  (with-foreign-keys-disabled db
+		    (sqlite:execute-non-query db
+					      ,(sconc "ALTER TABLE "
+						      sql-name
+						      " RENAME TO "
+						      temporary-table-name))
+		    (unwind-protect
+			 (progn
+			   (create-table)
+			   (setf made-table t)
+			   (if (migrate-table-data db
+						   ,temporary-table-name
+						   ,sql-name)
+			       (progn
+				 (sqlite:execute-non-query db ,(sconc "DROP TABLE "
+								      (temporary-table-name name)))
+				 (log-message 'message ,(sconc "AUTOMATED MIGRATION SUCCEEDED, APPARENTLY~%"))
+				 (setf success t))
+			       ;; else
+			       (progn
+				 (log-message 'error "AUTOMATED MIGRATION FAILED, HERE BE DRAGONS!~%")
+				 (error ,(sconc "can't migrate table " sql-name)))))
+		      (unless success
+			(when made-table
+			  (sqlite:execute-non-query db
+						    ,(sconc "DROP TABLE "
+							    sql-name)))
+			(sqlite:execute-non-query db
+						  ,(sconc "ALTER TABLE "
+							  temporary-table-name
+							  " RENAME TO "
+							  sql-name))))))))))))))
 
 (defun defsqlite-table-inserter (name columns)
   (multiple-value-bind (optional-columns required-columns)
