@@ -173,10 +173,11 @@
 (defun temporary-table-name (name)
   (sconc (sql-name name) "_temp"))
 
-(defun table-schema-from-db (db name)
-  (sqlite:execute-single db (sconc "SELECT sql FROM sqlite_master WHERE type = 'table' AND tbl_name = '"
-				   (sql-name name)
-				   "'")))
+(defmacro table-schema-from-db (db name)
+  `(sqlite:execute-single ,db
+			  ,(sconc "SELECT sql FROM sqlite_master WHERE type = 'table' AND tbl_name = '"
+				  (sql-name name)
+				  "'")))
 
 (defun defsqlite-table-creator (name columns)
   (let ((create-sql-name (create-table-sql-name name))
@@ -186,10 +187,7 @@
        (flet ((log-message (datum fmt &rest args)
 		(apply #'format t fmt args)
 		(apply log datum fmt args)))
-	 (let ((table-schema (sqlite:execute-single db
-						    ,(sconc "SELECT sql FROM sqlite_master WHERE type = 'table' AND tbl_name = '"
-							    sql-name
-							    "'"))))
+	 (let ((table-schema (table-schema-from-db db ,name)))
 	   (labels ((create-table ()
 		      (sqlite:execute-non-query db
 						,create-sql-name)
@@ -395,6 +393,16 @@
 	       (sqlite:step-statement stmt))))
 	(format *error-output* "~&warning: not generating deleter for ~w because it has no keys~%" name))))
 
+
+;; ========================================================
+;;
+;; ========================================================
+
+(defmacro register-table-creator (creator)
+  `(pushnew ',creator
+	    (gethash (symbol-package ',creator)
+		     *sqlite-tables*)))
+
 ;; ========================================================
 ;;
 ;; ========================================================
@@ -408,13 +416,87 @@
        ;;
        ,(defsqlite-table-creator name columns)
        ;;
-       (pushnew ',creator
-		(gethash ,(symbol-package creator)
-			 *sqlite-tables*))
+       (register-table-creator ,creator)
        ;;
        ,(defsqlite-table-inserter name columns)
        ,(defsqlite-table-updater name columns)
        ,(defsqlite-table-deleter name columns))))
+
+;; ========================================================
+;;
+;; ========================================================
+
+(defmacro defsqlite-table-enum (name &body cases)
+  (let* ((plural-name (symb name "s"))
+	 (plural-name-name (symbol-name* plural-name))
+	 (sql-name (sql-name plural-name))
+	 (creator (create-table-function-name plural-name))
+	 (sql (build-create-table-sql plural-name
+				      `((id :i :pk)
+					(name :t))))
+	 (cases (mapcar (lambda (case)
+			  (list* (symb "+"
+				       name
+				       "-"
+				       (second case)
+				       "+")
+				 case))
+			cases)))
+    `(progn
+       ,@ (mapcar (lambda (case)
+		    `(defconstant ,(first case)
+		       ,(second case)))
+		  cases)
+	  (defun ,creator (db log-message)
+	    (flet ((log-message (datum fmt &rest args)
+		     (apply log-message
+			    datum
+			    fmt
+			    args)))
+	      (let ((sql ,sql)
+		    (db-schema (table-schema-from-db db ,plural-name)))
+		(if (not db-schema)
+		    (progn
+		      (log-message 'message
+				   ,(sconc "creating "
+					   plural-name-name
+					   " table-enum"))
+		      (sqlite:execute-non-query db sql))
+		    ;; else
+		    (unless (string= db-schema sql)
+		      (error ,(sconc "mismatch in table schema for sqlite enum "
+				     plural-name-name))))
+		,@(mapcar (lambda (case)
+			    (destructuring-bind (constant id kind)
+				case
+			      (declare (ignore id))
+			      (let ((kind-name (symbol-name* kind)))
+				`(let ((db-value (sqlite:execute-single db
+									,(format nil "SELECT name FROM ~a WHERE id = ?"
+										 sql-name)
+									,constant)))
+				   (if db-value
+				       (unless (string= db-value ,kind-name)
+					 (error ,(sconc "mismatch when verifying sqlite enum "
+							plural-name-name
+							" for kind "
+							kind-name
+							"(~a in db)")
+						db-value))
+				       ;; else
+				       (progn
+					 (log-message 'message
+						      ,(sconc "inserting table enum "
+							      plural-name-name
+							      " kind: "
+							      kind-name))
+					 (sqlite:execute-non-query db
+								   ,(format nil "INSERT INTO ~a (id, name) VALUES (?, ?)"
+									    sql-name)
+								   ,constant
+								   ,kind-name)))))))
+			  cases))))
+       (register-table-creator ,creator))))
 
 ;; ========================================================
 ;;

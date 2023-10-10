@@ -8,9 +8,11 @@
 	   #:sql-and-equal-string
 	   #:with-sqlite-statements
            #:do-sqlite-query
+	   #:parse-select-form
 	   #:do-sqlite-query*
            #:sqlite-execute-to-flat-list
            #:defsqlite-table
+	   #:defsqlite-table-enum
            #:key-in-table
            #:select-or-insert
 	   #:with-sqlite-queries
