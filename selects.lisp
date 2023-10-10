@@ -62,10 +62,18 @@
 					   param-binds
 					   interpolate)))
 			   (:limit
-			    `(sconc " LIMIT "
-				    ,(expr (second clause)
-					   param-binds
-					   interpolate)))))
+			    (destructuring-bind (limit &optional offset)
+				(rest clause)
+			      `(sconc " LIMIT "
+				      ,(expr limit
+					     param-binds
+					     interpolate)
+				      ,(when offset
+					 " OFFSET ")
+				      ,(when offset
+					 (expr offset
+					       param-binds
+					       interpolate)))))))
 		       clauses))))
 
 (defun table-or-query (form param-binds interpolate)
