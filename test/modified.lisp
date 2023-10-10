@@ -45,3 +45,19 @@
 	    (:where (= id (:var id))))
 	(unless (string/= original-last last)
 	  (error "failed test ~a ~a" original-last last))))))
+
+(create-with-db-macro with-db db (asdf:system-relative-pathname "pjs-sqlite" "test/test.sqlite"))
+
+(defsqlite-table modified-test
+  (id :auto-key)
+  (name :t))
+
+(with-db
+  (create-modified-test-table db
+			      #'log-message)
+  (insert-modified-test db "test"))
+
+(defsqlite-table modified-test
+  (id :auto-key)
+  (name :t)
+  (last :modified))
