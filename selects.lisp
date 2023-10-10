@@ -354,13 +354,13 @@
   foo)
 
 (defmacro if-sqlite-query (db query yes no)
-  (let ((stmt (gensym)))
+  (bind ((:symbols stmt))
     (multiple-value-bind (results sql-forms bind-forms interpolated)
 	(parse-select-form query)
       (query-setup-skeleton db sql-forms bind-forms stmt
 			    `(if (sqlite:step-statement ,stmt)
 				 (with-statement-results ,stmt ,results
-				   (prog1
+				   (multiple-value-prog1
 				       ,yes
 				     (when (sqlite:step-statement ,stmt)
 				       (error "unexpected extra row ~a" ,interpolated))))
