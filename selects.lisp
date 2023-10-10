@@ -164,6 +164,16 @@
 			`(when ,test
 			   ,it))))
 	      compiled)))
+	 (:in
+	  (destructuring-bind (query-or-table key)
+	      (rest form)
+	    `(join " IN "
+		   ,(expr key
+			  param-binds
+			  interpolate)
+		   ,(table-or-query query-or-table
+				    param-binds
+				    interpolate))))
 	 ((null)
 	  `(sconc ,(expr (second form)
 			 param-binds
